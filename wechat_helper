@@ -1,0 +1,155 @@
+/**
+ * 获取微信Access_token
+ * @param callback
+ */
+const getTempAccesstoken = function(callback){
+    count_redis_helper.get('caimi_wx_token',(err,result)=>{
+        if(!err && result){
+            callback(null,result);
+        } else {
+            request.get('https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid='+settings['wxapp_config']['appid']+'&secret='+settings['wxapp_config']['secret'],(err,res,body)=>{
+                if(!err && body){
+                    body = JSON.parse(body);
+                    count_redis_helper.setex('caimi_wx_token_result',7000,JSON.stringify(body),_=>{
+                        count_redis_helper.setex('caimi_wx_token',7000,body['access_token'],_=>{
+                            callback(null,body['access_token']);
+                        })
+                    })
+                } else {
+                    callback('can not get access_token');
+                }
+            })
+        }
+    })
+}
+
+/**
+ * 获取用户信息
+ * @param token
+ * @param code
+ * @param callback
+ */
+const getWxUserInfo = function(token,code,callback){
+    request.get('https://api.weixin.qq.com/sns/oauth2/access_token?appid='+settings['wxapp_config']['appid']+'&secret='+settings['wxapp_config']['secret']+'&code='+code+'&grant_type=authorization_code',(err,res,body)=>{
+        if(!err && body){
+            body = JSON.parse(body);
+            request.get('https://api.weixin.qq.com/cgi-bin/user/info?access_token='+token+'&openid='+body['openid']+'&lang=zh_CN',(err,res,userinfo)=>{
+                if(!err && userinfo){
+                    callback(null,JSON.parse(userinfo));
+                } else {
+                    callback('can not get userinfo');
+                }
+            });
+        } else {
+            callback('can not get openid');
+        }
+    })
+}
+
+/**
+ * 获取未关注用户信息
+ * @param token
+ * @param code
+ * @param callback
+ */
+const getNoFollowWxUserInfo = function(token,code,callback){
+    request.get('https://api.weixin.qq.com/sns/oauth2/access_token?appid='+settings['wxapp_config']['appid']+'&secret='+settings['wxapp_config']['secret']+'&code='+code+'&grant_type=authorization_code',(err,res,body)=>{debugger
+        if(!err && body){
+            body = JSON.parse(body);
+            request.get('https://api.weixin.qq.com/sns/userinfo?access_token='+body['access_token']+'&openid='+body['openid']+'&lang=zh_CN',(err,res,userinfo)=>{debugger
+                if(!err && userinfo){
+                    callback(null,JSON.parse(userinfo));
+                } else {
+                    callback('can not get userinfo');
+                }
+            });
+        } else {
+            callback('can not get openid');
+        }
+    })
+}
+
+const getClientIp = function (req) {
+    return req.headers['x-forwarded-for'] ||
+        req.connection.remoteAddress ||
+        req.socket.remoteAddress ||
+        req.connection.socket.remoteAddress || '';
+};
+
+/**
+ * 生成prepayid
+ * @param req
+ * @param openid
+ * @param total_fee 单位为分
+ * @param description
+ * @param fianlCallback
+ */
+const getPrepayId = function(req,openid,total_fee,description,fianlCallback){debugger
+    total_fee = parseInt(total_fee);
+    let client_ip = getClientIp(req).match(/\d+.\d+.\d+.\d+/);
+    client_ip = client_ip ? client_ip.join('.') : null;
+    let body = {
+        "total_fee":total_fee,
+        "description":description,
+        "ip":client_ip
+    };
+    let prepay_id = '';
+    let nonce_str = '';
+    let timeStamp = 0;
+    let final_out_trade_no = '';
+    let callback_url = "http://feapi.feheadline.com/provider/api/v1/caimiweb-payment-callback";
+    if(process && process.env && process.env.profile=='test'){
+        callback_url = 'http://ghj.feheadline.com:18080/provider/api/v1/caimiweb-payment-callback';
+    }
+    nonce_str = Math.random().toString(36).substr(2);
+    timeStamp = parseInt(new Date().getTime());
+    let out_trade_no = ('' + timeStamp + nonce_str).substring(0, 30);
+    final_out_trade_no = out_trade_no;
+    let start_time = formatDateForWX(new Date());
+    let expire_time = (parseInt(formatDateForWX(new Date(new Date().getTime()+1000*60*10))));
+    let stringA = 'appid='+settings['wxapp_config']['appid']+'&body='+body['description']+'&mch_id='+settings['wxapp_config']['mch_id']+'&nonce_str=' + nonce_str + '&notify_url='+callback_url + '&openid=' + openid + '&out_trade_no=' + out_trade_no +'&spbill_create_ip='+body['ip']+'&time_expire='+expire_time+'&time_start='+start_time+'&total_fee='+body['total_fee']+'&trade_type=JSAPI';
+    let stringSignTemp = stringA + '&key='+settings['wxapp_config']['key'];
+    let sign = utilMd5.hexMD5(stringSignTemp).toUpperCase();
+    let xmlData = '<xml>'+
+        "<appid>"+settings['wxapp_config']['appid']+"</appid>"+
+        "<body>"+body['description']+"</body>" +
+        "<mch_id>"+settings['wxapp_config']['mch_id']+"</mch_id>" +
+        "<nonce_str>" + nonce_str + "</nonce_str>" +
+        "<notify_url>"+callback_url+"</notify_url>" +
+        "<openid>" + openid + "</openid>" +
+        "<out_trade_no>" + out_trade_no + "</out_trade_no>" +
+        "<spbill_create_ip>"+body['ip']+"</spbill_create_ip>" +
+        "<time_expire>"+expire_time+"</time_expire>" +
+        "<time_start>"+start_time+"</time_start>" +
+        "<total_fee>"+body['total_fee']+"</total_fee>" +
+        "<trade_type>JSAPI</trade_type>" +
+        "<sign>" + sign + "</sign>" +
+        "</xml>";
+    let options = {
+        "url": 'https://api.mch.weixin.qq.com/pay/unifiedorder',
+        "method": "POST",
+        "headers": {
+            "Content-Type": "text/xml",
+            "charset":"utf-8"
+        },
+        "form":xmlData
+    };
+    request.post(options,(err,result,body)=>{debugger
+        if(!err && body.match(/\<\bprepay_id.*\<\/prepay_id\b\>/g)){
+            prepay_id = body.match(/\<\bprepay_id.*\<\/prepay_id\b\>/g)[0].match('CDATA\\[(.*?)\\]')[1];
+            let paySignStr = 'appId='+settings['wxapp_config']['appid']+'&nonceStr=' + nonce_str + '&package=prepay_id=' + prepay_id + '&signType=MD5&timeStamp=' + parseInt(timeStamp/1000) + '&key='+settings['wxapp_config']['key'];
+            let paySign = utilMd5.hexMD5(paySignStr).toUpperCase();
+            fianlCallback(null,{
+                prepay_id:prepay_id,
+                nonce_str:nonce_str,
+                paySign:paySign,
+                timeStamp:parseInt(timeStamp/1000),
+                out_trade_no:final_out_trade_no,
+                app_id:settings['wxapp_config']['appid']
+            });
+        } else {
+            fianlCallback('fail to post request for prepay_id');
+        }
+    })
+
+}
